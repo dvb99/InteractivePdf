@@ -24,6 +24,14 @@ from sys import exit
 import pyttsx3 as tts
 import queue
 import threading
+import _thread
+import pyaudio
+import struct
+from datetime import datetime
+import os
+import snowboydecoder
+import signal
+sys.path.append(os.path.join(os.path.dirname(__file__), './python'))
 
 """
     You want to look for 3 points in this code, marked with comment "LOCATION X". 
@@ -31,11 +39,12 @@ import threading
     2. Where the trigger to make the call takes place in the event loop
     3. Where the completion of the call is indicated in the event loop
     Demo on how to add a long-running item to your PySimpleGUI Event Loop
-     
+
 """
 # initialize engine
 engine = tts.init()
-stop_engine = False
+is_reading = False
+interrupted = False
 
 def getTextFromPage(doc,curPage):
     # returns all textlines from given page
@@ -43,26 +52,78 @@ def getTextFromPage(doc,curPage):
     lines.extend(doc[curPage].getText().split('\n'))
     return lines
 
+def signal_handler(signal, frame):
+    global interrupted
+    print("I think Ctrl C")
+    interrupted = True
+
+
+def interrupt_callback():
+    global interrupted
+    return interrupted
+
+def keywordSTART(window):
+    # inform main thread start event is requested.
+    window.write_event_value('start', '')
+
+def keywordSTOP(window):
+    # inform main thread stop event is requested.
+    window.write_event_value('stop', '')
+
+
+def alwaysListening(window):
+    
+    models=["resources/alexa/alexa_02092017.umdl","resources/models/jarvis.umdl"]
+
+    # sensitivity = [0.5]*len(models)
+
+    detector = snowboydecoder.HotwordDetector(models, 
+                                            sensitivity=[0.6,0.8,0.8],
+                                            apply_frontend=True)
+    callbacks = [lambda: keywordSTART(window),
+                lambda: keywordSTOP(window),
+                lambda: keywordSTOP(window)]
+    print('Listening... Press Ctrl+C to exit')
+
+    # main loop
+    # make sure you have the same numbers of callbacks and models
+    detector.start(detected_callback=callbacks,
+                sleep_time=0.01)
+
+    detector.terminate()
+
+
+
+def long_function(window):
+    threading.Thread(target=alwaysListening, args=(window,), daemon=True).start()
 
 # ############################# User callable CPU intensive code #############################
 # Put your long running code inside this "wrapper"
 # NEVER make calls to PySimpleGUI from this thread (or any thread)!
 # Create one of these functions for EVERY long-running call you want to make
-def long_function_wrapper(cur_page, gui_queue,pdfText):
-    # LOCATION 1
-    # this is our "long running function call"
-    global stop_engine 
+def readeachline(line):
     global engine
-    for line in pdfText:
-        if stop_engine:
-            if engine.isBusy():
-                engine.stop()
-                stop_engine = False
-                break
-        print(line)
-        engine.setProperty(name="voice",value=200)
+    try:
         engine.say(line)
         engine.runAndWait()
+    except Exception:
+        print("Exception at readeachline")
+      #  _thread.exit()
+    else:
+        pass
+    
+
+def play(cur_page, gui_queue,pdfText):
+    # LOCATION 1
+    # this is our "long running function call"
+    global is_reading 
+    for line in pdfText:
+        if is_reading:
+            readeachline(line)   # pipelining each line to function        
+        else:
+            _thread.exit()
+            
+
     # at the end of the work, before exiting, send a message back to the GUI indicating end
     gui_queue.put('{} ::: done'.format(cur_page))
     # at this point, the thread exits
@@ -100,21 +161,20 @@ def the_gui():
         [
             sg.Button('Prev'),
             sg.Button('Next'),
-            sg.Button('Start'),
-            sg.Button('Stop'),
             sg.Text('Page:'),
             goto,
+            sg.Button('Initiate'),
         ],
         [txt_elem],
     ]
-    my_keys = ("Next", "Next:34", "Prev", "Prior:33","Start","Stop"
+    my_keys = ("Next", "Next:34", "Prev", "Prior:33"
                 "MouseWheel:Down", "MouseWheel:Up")
 
-    page_size = (600, 600)
-    window = sg.Window(title,
+    page_size = (750,700)
+    window = sg.Window(title,size=page_size,
                         grab_anywhere=True,
                         resizable=True,
-                        return_keyboard_events=True,
+                    return_keyboard_events=True,
                         use_default_focus=False).Layout(layout)
 
     old_page = 0
@@ -124,6 +184,7 @@ def the_gui():
         event, values = window.read(timeout=100)
         lines =[]
         force_page = False
+        global is_reading
         if event == sg.WIN_CLOSED:
             break
 
@@ -143,19 +204,23 @@ def the_gui():
             cur_page += 1
         elif event in ("Prev", "Prior:33", "MouseWheel:Up"):
             cur_page -= 1
-        elif event in ("Start"):
+        elif event =="start" :
             # LOCATION 2
             # STARTING long run by starting a thread
-            thread_id = threading.Thread(target=long_function_wrapper,
-                                         args=(cur_page+1, gui_queue,getTextFromPage(doc,cur_page),),
-                                         daemon=True,
-                                         )
-            thread_id.start()
+            if not is_reading:
+                is_reading=True
+                _thread.start_new_thread(play,(cur_page+1, gui_queue,getTextFromPage(doc,cur_page),),)
+            else :
+                print("First stop the reading")
         
-        if event =='Stop':
-            global stop_engine
-            stop_engine=True
-              
+        elif event =='stop':
+            if is_reading:
+                is_reading=False
+        
+        elif event == "Initiate":
+            # This function starts microphone such that it will continuously listen for hot wards
+            long_function(window)
+             
         # --------------- Read next message coming in from threads ---------------
         try:
             message = gui_queue.get_nowait()    # see if something has been posted to Queue
