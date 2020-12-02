@@ -38,13 +38,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), './python'))
     1. Where you put your call that takes a long time
     2. Where the trigger to make the call takes place in the event loop
     3. Where the completion of the call is indicated in the event loop
-    Demo on how to add a long-running item to your PySimpleGUI Event Loop
-
+    Demo on how to add a long-running item to your PySimpleGUI Event Loop   
+   
 """
 # initialize engine
 engine = tts.init()
 is_reading = False
 interrupted = False
+line_Num = 0
 
 def getTextFromPage(doc,curPage):
     # returns all textlines from given page
@@ -70,19 +71,24 @@ def keywordSTOP(window):
     # inform main thread stop event is requested.
     window.write_event_value('stop', '')
 
+def keywordHIGHLIGHT(window):
+    # inform highlight of current line is requested.
+    window.write_event_value('highlight','')
 
 def alwaysListening(window):
-    
-    models=["resources/alexa/alexa_02092017.umdl","resources/models/jarvis.umdl"]
+
+    models=["resources/alexa/alexa_02092017.umdl","resources/models/jarvis.umdl",
+            "resources/models/computer.umdl"]
 
     # sensitivity = [0.5]*len(models)
 
     detector = snowboydecoder.HotwordDetector(models, 
-                                            sensitivity=[0.6,0.8,0.8],
+                                            sensitivity=[0.6,0.8,0.8,0.6],
                                             apply_frontend=True)
     callbacks = [lambda: keywordSTART(window),
                 lambda: keywordSTOP(window),
-                lambda: keywordSTOP(window)]
+                lambda: keywordSTOP(window),
+                lambda : keywordHIGHLIGHT(window)]
     print('Listening... Press Ctrl+C to exit')
 
     # main loop
@@ -116,9 +122,10 @@ def readeachline(line):
 def play(cur_page, gui_queue,pdfText):
     # LOCATION 1
     # this is our "long running function call"
-    global is_reading 
+    global is_reading , line_Num
     for line in pdfText:
         if is_reading:
+            line_Num += 1
             readeachline(line)   # pipelining each line to function        
         else:
             _thread.exit()
@@ -129,7 +136,20 @@ def play(cur_page, gui_queue,pdfText):
     # at this point, the thread exits
     return
 
-    
+
+def highlight(fname, cur_page , line):
+    # highlight the line in original pdf file.
+    doc = fitz.open(fname)
+    page = doc[cur_page]
+    ### SEARCH
+    text = line
+    text_instances = page.searchFor(text)
+    ### HIGHLIGHT
+    for inst in text_instances:
+        highlight = page.addHighlightAnnot(inst)      
+    ### OUTPUT  
+    doc.save(fname, incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    doc.close()
             
 ############################# Begin GUI code #############################
 def the_gui():
@@ -184,7 +204,7 @@ def the_gui():
         event, values = window.read(timeout=100)
         lines =[]
         force_page = False
-        global is_reading
+        global is_reading ,line_Num
         if event == sg.WIN_CLOSED:
             break
 
@@ -202,14 +222,16 @@ def the_gui():
 
         elif event in ("Next", "Next:34", "MouseWheel:Down"):
             cur_page += 1
+            line_Num = 0
         elif event in ("Prev", "Prior:33", "MouseWheel:Up"):
             cur_page -= 1
+            line_Num = 0
         elif event =="start" :
             # LOCATION 2
             # STARTING long run by starting a thread
             if not is_reading:
                 is_reading=True
-                _thread.start_new_thread(play,(cur_page+1, gui_queue,getTextFromPage(doc,cur_page),),)
+                _thread.start_new_thread(play,(cur_page+1, gui_queue,getTextFromPage(doc,cur_page)[line_Num:],),)
             else :
                 print("First stop the reading")
         
@@ -220,7 +242,10 @@ def the_gui():
         elif event == "Initiate":
             # This function starts microphone such that it will continuously listen for hot wards
             long_function(window)
-             
+
+        elif event == "highlight":
+            # This event highlights currently reading line.
+            highlight(fname,cur_page,(getTextFromPage(doc,cur_page)[line_Num]))     
         # --------------- Read next message coming in from threads ---------------
         try:
             message = gui_queue.get_nowait()    # see if something has been posted to Queue
