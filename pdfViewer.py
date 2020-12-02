@@ -43,6 +43,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), './python'))
 """
 # initialize engine
 engine = tts.init()
+engine.setProperty('voice', 'english+f2') # https://github.com/RapidWareTech/pyttsx/issues/51
 is_reading = False
 interrupted = False
 line_Num = 0
