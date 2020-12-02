@@ -24,18 +24,25 @@ from sys import exit
 import pyttsx3 as tts
 import queue
 import threading
+import _thread
+import pyaudio
+import struct
+from datetime import datetime
+import os
+import pvporcupine
+sys.path.append(os.path.join(os.path.dirname(__file__), './python'))
 
 """
     You want to look for 3 points in this code, marked with comment "LOCATION X". 
     1. Where you put your call that takes a long time
     2. Where the trigger to make the call takes place in the event loop
     3. Where the completion of the call is indicated in the event loop
-    Demo on how to add a long-running item to your PySimpleGUI Event Loop
-     
+    Demo on how to add a long-running item to your PySimpleGUI Event Loop      
+
 """
 # initialize engine
 engine = tts.init()
-stop_engine = False
+is_reading = False
 
 def getTextFromPage(doc,curPage):
     # returns all textlines from given page
@@ -43,26 +50,91 @@ def getTextFromPage(doc,curPage):
     lines.extend(doc[curPage].getText().split('\n'))
     return lines
 
+def listen_to_voice_commands(window):
+    audio_stream = None
+    handle = None
+    pa = None
+    try:
+        library_path = 'C:/Users/dheer/AppData/Local/Programs/Python/Python38/Lib/site-packages/pvporcupine/lib/windows/amd64/libpv_porcupine.dll'
+        model_file_path = 'C:/Users/dheer/AppData/Local/Programs/Python/Python38/Lib/site-packages/pvporcupine/lib/common/porcupine_params.pv'
+    # keyword_file_paths = ['C:/Users/dheer/AppData/Local/Programs/Python/Python38/Lib/site-packages/pvporcupine/resources/keyword_files/windows/bumblebee_windows.ppn']
+        
+        # use bumblebee to start reading , terminator to stop reading 
+        num_keywords = ['bumblebee','terminator']
+        sensitivity = [0.2,0.6]
+        handle = pvporcupine.create(library_path,
+                                    model_file_path,
+                                    keywords=num_keywords,
+                                    sensitivities=sensitivity
+                                    )
+
+        pa = pyaudio.PyAudio()
+        audio_stream = pa.open(
+                rate=handle.sample_rate,
+                channels=1,
+                format=pyaudio.paInt16,
+                input=True,
+                frames_per_buffer=handle.frame_length)
+        print('Listening for keyword bumblebee , terminator')
+
+        while True:
+            pcm = audio_stream.read(handle.frame_length)
+            pcm = struct.unpack_from("h" * handle.frame_length, pcm)
+            result = handle.process(pcm)
+            if result >= 0:
+                print('[%s] detected keyword ' % (str(datetime.now())), num_keywords[result] )
+                if num_keywords[result] == "bumblebee":
+                    window.write_event_value('start', '')
+                elif num_keywords[result] == "terminator":
+                    window.write_event_value('stop', '')
+    except KeyboardInterrupt:
+        print('stopping ...')
+    finally:
+        if handle is not None:
+            handle.delete()
+
+        if audio_stream is not None:
+            audio_stream.close()
+
+        if pa is not None:
+            pa.terminate()
+
+    _AUDIO_DEVICE_INFO_KEYS = ['index',
+                            'name',
+                            'defaultSampleRate',
+                            'maxInputChannels']
+    
+
+def long_function(window):
+    threading.Thread(target=listen_to_voice_commands, args=(window,), daemon=True).start()
 
 # ############################# User callable CPU intensive code #############################
 # Put your long running code inside this "wrapper"
 # NEVER make calls to PySimpleGUI from this thread (or any thread)!
 # Create one of these functions for EVERY long-running call you want to make
-def long_function_wrapper(cur_page, gui_queue,pdfText):
-    # LOCATION 1
-    # this is our "long running function call"
-    global stop_engine 
+def readeachline(line):
     global engine
-    for line in pdfText:
-        if stop_engine:
-            if engine.isBusy():
-                engine.stop()
-                stop_engine = False
-                break
-        print(line)
-        engine.setProperty(name="voice",value=200)
+    try:
         engine.say(line)
         engine.runAndWait()
+    except Exception:
+        print("Exception at readeachline")
+      #  _thread.exit()
+    else:
+        pass
+    
+
+def play(cur_page, gui_queue,pdfText):
+    # LOCATION 1
+    # this is our "long running function call"
+    global is_reading 
+    for line in pdfText:
+        if is_reading:
+            readeachline(line)   # pipelining each line to function        
+        else:
+            _thread.exit()
+            
+
     # at the end of the work, before exiting, send a message back to the GUI indicating end
     gui_queue.put('{} ::: done'.format(cur_page))
     # at this point, the thread exits
@@ -100,21 +172,20 @@ def the_gui():
         [
             sg.Button('Prev'),
             sg.Button('Next'),
-            sg.Button('Start'),
-            sg.Button('Stop'),
             sg.Text('Page:'),
             goto,
+            sg.Button('Initiate'),
         ],
         [txt_elem],
     ]
-    my_keys = ("Next", "Next:34", "Prev", "Prior:33","Start","Stop"
+    my_keys = ("Next", "Next:34", "Prev", "Prior:33"
                 "MouseWheel:Down", "MouseWheel:Up")
 
-    page_size = (600, 600)
-    window = sg.Window(title,
+    page_size = (750,700)
+    window = sg.Window(title,size=page_size,
                         grab_anywhere=True,
                         resizable=True,
-                        return_keyboard_events=True,
+                    return_keyboard_events=True,
                         use_default_focus=False).Layout(layout)
 
     old_page = 0
@@ -124,6 +195,7 @@ def the_gui():
         event, values = window.read(timeout=100)
         lines =[]
         force_page = False
+        global is_reading
         if event == sg.WIN_CLOSED:
             break
 
@@ -143,19 +215,23 @@ def the_gui():
             cur_page += 1
         elif event in ("Prev", "Prior:33", "MouseWheel:Up"):
             cur_page -= 1
-        elif event in ("Start"):
+        elif event =="start" :
             # LOCATION 2
             # STARTING long run by starting a thread
-            thread_id = threading.Thread(target=long_function_wrapper,
-                                         args=(cur_page+1, gui_queue,getTextFromPage(doc,cur_page),),
-                                         daemon=True,
-                                         )
-            thread_id.start()
+            if not is_reading:
+                is_reading=True
+                _thread.start_new_thread(play,(cur_page+1, gui_queue,getTextFromPage(doc,cur_page),),)
+            else :
+                print("First stop the reading")
         
-        if event =='Stop':
-            global stop_engine
-            stop_engine=True
-              
+        elif event =='stop':
+            if is_reading:
+                is_reading=False
+        
+        elif event == "Initiate":
+            # This function starts microphone such that it will continuously listen for hot wards
+            long_function(window)
+             
         # --------------- Read next message coming in from threads ---------------
         try:
             message = gui_queue.get_nowait()    # see if something has been posted to Queue
