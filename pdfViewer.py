@@ -37,12 +37,15 @@ import threading
 engine = tts.init()
 stop_engine = False
 
+removed new function 1
+
 def getTextFromPage(doc,curPage):
     # returns all textlines from given page
     lines = []
     lines.extend(doc[curPage].getText().split('\n'))
     return lines
 
+removed new class
 
 # ############################# User callable CPU intensive code #############################
 # Put your long running code inside this "wrapper"
